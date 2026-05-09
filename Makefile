@@ -1,4 +1,4 @@
-.PHONY: help build run test clean podman podman-run compose-up compose-down install release
+.PHONY: help build run test clean compose-up compose-down install release
 
 # Default target
 help:
@@ -10,9 +10,7 @@ help:
 	@echo "  make test           - Run all tests"
 	@echo "  make clean          - Clean build artifacts"
 	@echo ""
-	@echo "  make podman         - Build Podman image"
-	@echo "  make podman-run     - Run Podman container"
-	@echo "  make compose-up     - Start full stack with podman-compose"
+	@echo "  make compose-up     - Start monitoring stack (Prometheus, Grafana, Jaeger)"
 	@echo "  make compose-down   - Stop podman-compose stack"
 	@echo ""
 	@echo "  make install        - Install binary to /usr/local/bin"
@@ -50,21 +48,15 @@ clean:
 	cargo clean
 	rm -rf target/
 
-# Podman commands
-podman:
-	podman build -t telemetry-service:latest .
-
-podman-run:
-	podman run -it --rm --name telemetry-service telemetry-service:latest
-
 compose-up:
 	podman-compose up -d
 	@echo ""
-	@echo "Services started:"
-	@echo "  - Telemetry Service: podman logs telemetry-service -f"
+	@echo "Monitoring stack started:"
 	@echo "  - Jaeger UI:         http://localhost:16686"
 	@echo "  - Prometheus:        http://localhost:9090"
 	@echo "  - Grafana:           http://localhost:3000 (admin/admin)"
+	@echo ""
+	@echo "Run the telemetry service natively: make run"
 
 compose-down:
 	podman-compose down

@@ -6,7 +6,7 @@ use opentelemetry_sdk::{
     Resource,
 };
 use prometheus::{Encoder, TextEncoder};
-use sysinfo::{System, RefreshKind, CpuRefreshKind, MemoryRefreshKind};
+use sysinfo::{System, RefreshKind, CpuRefreshKind, MemoryRefreshKind, Pid};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -17,20 +17,24 @@ struct SystemMetrics {
     system: Arc<Mutex<System>>,
     cpu_time_seconds: Arc<Mutex<f64>>,
     last_cpu_sample: Arc<Mutex<Instant>>,
+    self_pid: Pid,
 }
 
 impl SystemMetrics {
     fn new() -> Self {
-        let system = System::new_with_specifics(
+        let self_pid = Pid::from(std::process::id() as usize);
+        let mut system = System::new_with_specifics(
             RefreshKind::new()
                 .with_cpu(CpuRefreshKind::everything())
                 .with_memory(MemoryRefreshKind::everything()),
         );
-        
+        system.refresh_process(self_pid);
+
         Self {
             system: Arc::new(Mutex::new(system)),
             cpu_time_seconds: Arc::new(Mutex::new(0.0)),
             last_cpu_sample: Arc::new(Mutex::new(Instant::now())),
+            self_pid,
         }
     }
 
@@ -53,6 +57,22 @@ impl SystemMetrics {
 
     fn get_cpu_time_seconds(&self) -> f64 {
         *self.cpu_time_seconds.lock().unwrap()
+    }
+
+    fn get_self_cpu_usage(&self) -> f64 {
+        let mut system = self.system.lock().unwrap();
+        system.refresh_process(self.self_pid);
+        system.process(self.self_pid)
+            .map(|p| p.cpu_usage() as f64)
+            .unwrap_or(0.0)
+    }
+
+    fn get_self_memory_bytes(&self) -> u64 {
+        let mut system = self.system.lock().unwrap();
+        system.refresh_process(self.self_pid);
+        system.process(self.self_pid)
+            .map(|p| p.memory())
+            .unwrap_or(0)
     }
 
     fn get_memory_usage_percent(&self) -> f64 {
@@ -169,7 +189,7 @@ fn register_metrics(meter: &Meter, metrics: Arc<SystemMetrics>) -> Result<()> {
 
     // Memory total bytes gauge
     let mem_total_metrics = metrics.clone();
-    let hostname_clone = hostname;
+    let hostname_clone = hostname.clone();
     let _mem_total_gauge = meter
         .u64_observable_gauge("system.memory.total")
         .with_description("Total memory in bytes")
@@ -178,6 +198,38 @@ fn register_metrics(meter: &Meter, metrics: Arc<SystemMetrics>) -> Result<()> {
             let total = mem_total_metrics.get_memory_total_bytes();
             observer.observe(
                 total,
+                &[KeyValue::new("host.name", hostname_clone.clone())],
+            );
+        })
+        .init();
+
+    // Process CPU usage gauge
+    let proc_cpu_metrics = metrics.clone();
+    let hostname_clone = hostname.clone();
+    let _proc_cpu_gauge = meter
+        .f64_observable_gauge("process.cpu.usage")
+        .with_description("CPU usage of the telemetry-service process")
+        .with_unit(Unit::new("%"))
+        .with_callback(move |observer| {
+            let usage = proc_cpu_metrics.get_self_cpu_usage();
+            observer.observe(
+                usage,
+                &[KeyValue::new("host.name", hostname_clone.clone())],
+            );
+        })
+        .init();
+
+    // Process memory usage gauge
+    let proc_mem_metrics = metrics.clone();
+    let hostname_clone = hostname;
+    let _proc_mem_gauge = meter
+        .u64_observable_gauge("process.memory.usage")
+        .with_description("RSS memory usage of the telemetry-service process")
+        .with_unit(Unit::new("By"))
+        .with_callback(move |observer| {
+            let bytes = proc_mem_metrics.get_self_memory_bytes();
+            observer.observe(
+                bytes,
                 &[KeyValue::new("host.name", hostname_clone.clone())],
             );
         })
@@ -234,9 +286,12 @@ async fn metrics_logging_loop(metrics: Arc<SystemMetrics>) {
         let mem_usage_percent = metrics.get_memory_usage_percent();
         let mem_used_bytes = metrics.get_memory_used_bytes();
         let mem_total_bytes = metrics.get_memory_total_bytes();
+        let self_cpu = metrics.get_self_cpu_usage();
+        let self_mem_bytes = metrics.get_self_memory_bytes();
 
         let mem_used_gb = mem_used_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
         let mem_total_gb = mem_total_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+        let self_mem_mb = self_mem_bytes as f64 / 1024.0 / 1024.0;
 
         println!("\n📊 Telemetry Export at {}", timestamp);
         println!("─────────────────────────────────────────────────────────");
@@ -246,6 +301,7 @@ async fn metrics_logging_loop(metrics: Arc<SystemMetrics>) {
         println!("  Memory Utilization: {:.2}%", mem_usage_percent);
         println!("  Memory Usage: {:.2} GB / {:.2} GB", mem_used_gb, mem_total_gb);
         println!("  Memory Usage (bytes): {} / {}", mem_used_bytes, mem_total_bytes);
+        println!("  [self] CPU: {:.2}%  Memory: {:.1} MB", self_cpu, self_mem_mb);
     }
 }
 

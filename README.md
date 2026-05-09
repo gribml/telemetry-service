@@ -13,7 +13,6 @@ A Rust service that collects and publishes CPU and memory utilization telemetry 
   - OTLP (configurable)
 - ⚡ **Async Runtime**: Built with Tokio for efficient async operations
 - 🏷️ **Rich Metadata**: Includes hostname and service information
-- 🐋 **Container Ready**: Podman/Docker compatible with rootless support
 - 📊 **Prometheus Ready**: Built-in HTTP server exposing `/metrics` endpoint
 
 ## Metrics Collected
@@ -22,19 +21,28 @@ A Rust service that collects and publishes CPU and memory utilization telemetry 
 - `system.cpu.utilization` - CPU usage percentage (0-100%)
   - Unit: `%`
   - Type: Observable Gauge
+  - Prometheus name: `system_cpu_utilization_percent`
+
+- `system.cpu.time` - Cumulative CPU time consumed across all cores
+  - Unit: `s`
+  - Type: Observable Counter
+  - Prometheus name: `system_cpu_time_total`
 
 ### Memory Metrics
 - `system.memory.utilization` - Memory usage percentage (0-100%)
   - Unit: `%`
   - Type: Observable Gauge
+  - Prometheus name: `system_memory_utilization_percent`
 
 - `system.memory.usage` - Memory used in bytes
   - Unit: `By` (bytes)
   - Type: Observable Gauge
+  - Prometheus name: `system_memory_usage_bytes`
 
 - `system.memory.total` - Total available memory in bytes
   - Unit: `By` (bytes)
   - Type: Observable Gauge
+  - Prometheus name: `system_memory_total_bytes`
 
 All metrics include the `host.name` attribute for identification.
 
@@ -229,19 +237,16 @@ curl http://localhost:8080/metrics
 # Or configure in System Preferences → Security & Privacy → Firewall
 ```
 
-### Podman/Docker (For Development/Testing Only)
+### Monitoring Stack (Prometheus, Grafana, Jaeger)
 
-**⚠️ NOT RECOMMENDED for production** - container sees only container resources, not host resources.
-
-For testing the monitoring stack (Prometheus, Grafana, Jaeger):
+Run the supporting observability stack in containers while the telemetry service runs natively:
 
 ```bash
-# Run telemetry-service natively on host
-cargo run --release
-
 # Run monitoring stack in containers
-# Edit prometheus/prometheus.yml to point to host IP
-podman-compose up -d prometheus grafana jaeger
+make compose-up
+
+# Run telemetry service natively on the host
+cargo run --release
 ```
 
 ## Configuration

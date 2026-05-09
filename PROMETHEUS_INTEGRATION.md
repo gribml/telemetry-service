@@ -156,13 +156,13 @@ scrape_configs:
   - job_name: 'telemetry-service'
     scrape_interval: 15s           # How often to scrape
     static_configs:
-      - targets: ['telemetry-service:8080']  # Service hostname:port
+      - targets: ['host.docker.internal:8080']  # Host machine (telemetry service runs natively)
     metrics_path: '/metrics'       # Endpoint to scrape
 ```
 
 **How it works:**
 1. Every 15 seconds, Prometheus makes an HTTP GET request
-2. `GET http://telemetry-service:8080/metrics`
+2. `GET http://host.docker.internal:8080/metrics`
 3. Receives metrics in Prometheus format
 4. Stores time-series data in TSDB
 5. Makes data available for querying
@@ -172,11 +172,7 @@ scrape_configs:
 ### 1. Start the Service
 
 ```bash
-# Standalone
 cargo run
-
-# With Podman Compose
-make compose-up
 ```
 
 ### 2. Verify Metrics Endpoint
@@ -335,13 +331,9 @@ You can create a dashboard JSON:
 **Problem:** Prometheus UI shows telemetry-service as "DOWN"
 
 **Solutions:**
-1. Check network connectivity:
-   ```bash
-   podman exec prometheus ping telemetry-service
-   ```
-2. Verify port is exposed in `podman-compose.yml`
-3. Check service is running: `podman ps`
-4. Verify endpoint: `curl http://localhost:8080/metrics`
+1. Check the telemetry service is running on the host: `curl http://localhost:8080/metrics`
+2. Verify `prometheus/prometheus.yml` target is `host.docker.internal:8080`
+3. Check Prometheus container can reach the host: `podman exec prometheus curl http://host.docker.internal:8080/metrics`
 
 ### Metrics Not Updating
 

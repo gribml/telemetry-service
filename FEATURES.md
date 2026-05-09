@@ -132,8 +132,6 @@ Structured JSON format for logging systems or custom integrations.
 - ✅ **Linux**: Full support
 - ✅ **Windows**: Full support (via sysinfo)
 - ✅ **FreeBSD**: Full support
-- ✅ **Container Environments**: Podman, Docker, Kubernetes
-
 ### Deployment Options
 
 1. **Standalone Binary**
@@ -141,30 +139,12 @@ Structured JSON format for logging systems or custom integrations.
    - No dependencies
    - Cross-platform
 
-2. **Podman/Docker Container**
-   - Lightweight image
-   - Multi-stage build
-   - ~50MB final size
-   - Rootless support
-
-3. **System Service**
+2. **System Service**
    - systemd (Linux)
    - launchd (macOS)
    - Windows Service Manager
 
-4. **Kubernetes**
-   - DaemonSet deployment
-   - Node-level monitoring
-   - Easy scaling
-
 ## Security Features
-
-### Container Security
-
-- Non-root user execution
-- Minimal base image (Debian slim)
-- No unnecessary capabilities
-- Resource limits enforced
 
 ### System Service Security
 

@@ -47,43 +47,17 @@ Press Ctrl+C to stop
 
 Press `Ctrl+C` to stop the service.
 
-## 4. Podman Quick Start
+## 4. Start the Monitoring Stack
 
-### Build and Run
-
-```bash
-# Build Podman image
-podman build -t telemetry-service .
-
-# Run the container
-podman run -it --rm telemetry-service
-```
-
-Or use the Makefile:
+Run Prometheus, Grafana, and Jaeger in containers while the telemetry service runs natively on the host:
 
 ```bash
-make podman         # Build image
-make podman-run     # Run container
-```
-
-### Using Podman Compose with Full Stack
-
-Run with Jaeger, Prometheus, and Grafana:
-
-```bash
-podman-compose up -d
-```
-
-Or use the Makefile:
-
-```bash
-make compose-up     # Start all services
-make compose-logs   # View logs
-make compose-down   # Stop all services
+make compose-up     # Start monitoring stack
+make compose-logs   # View container logs
+make compose-down   # Stop monitoring stack
 ```
 
 Then access:
-- **Telemetry Service**: Check logs with `podman logs telemetry-service -f`
 - **Jaeger UI**: http://localhost:16686
 - **Prometheus**: http://localhost:9090
 - **Grafana**: http://localhost:3000 (login: admin/admin)
@@ -121,7 +95,7 @@ global:
 scrape_configs:
   - job_name: 'telemetry-service'
     static_configs:
-      - targets: ['localhost:8080']
+      - targets: ['host.docker.internal:8080']
 EOF
 ```
 
@@ -190,50 +164,9 @@ sudo launchctl load /Library/LaunchDaemons/com.telemetry.service.plist
 sudo launchctl list | grep telemetry
 ```
 
-### Kubernetes
-
-Create `deployment.yaml`:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: telemetry-service
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: telemetry-service
-  template:
-    metadata:
-      labels:
-        app: telemetry-service
-    spec:
-      containers:
-      - name: telemetry-service
-        image: telemetry-service:latest
-        resources:
-          limits:
-            memory: "256Mi"
-            cpu: "500m"
-        env:
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: "http://jaeger:4317"
-```
-
-Deploy:
-```bash
-kubectl apply -f deployment.yaml
-```
-
 ## 7. Monitoring the Service
 
 ### View Logs
-
-**Podman:**
-```bash
-podman logs telemetry-service -f
-```
 
 **Linux systemd:**
 ```bash
