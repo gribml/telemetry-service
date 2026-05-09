@@ -119,9 +119,11 @@ The service will:
 ─────────────────────────────────────────────────────────
   Host: your-hostname
   CPU Utilization: 33.25%
+  CPU Time (accumulated): 12.450s
   Memory Utilization: 79.17%
   Memory Usage: 12.67 GB / 16.00 GB
   Memory Usage (bytes): 13601275904 / 17179869184
+  [self] CPU: 0.21%  Memory: 14.3 MB
 ```
 
 ## Deployment
