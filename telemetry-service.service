@@ -1,0 +1,26 @@
+[Unit]
+Description=Telemetry Service - CPU and Memory Monitoring with OpenTelemetry
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/telemetry-service
+Restart=always
+RestartSec=10
+WorkingDirectory=/tmp
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits
+MemoryLimit=256M
+CPUQuota=50%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telemetry-service
+
+[Install]
+WantedBy=multi-user.target

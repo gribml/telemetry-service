@@ -1,0 +1,64 @@
+# Example Prometheus alerting rules for telemetry-service
+# Uncomment the rule_files section in prometheus.yml to enable
+
+groups:
+  - name: system_alerts
+    interval: 30s
+    rules:
+      # Alert when CPU usage is consistently high
+      - alert: HighCPUUsage
+        expr: system_cpu_utilization > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage detected on {{ $labels.host_name }}"
+          description: "CPU usage is {{ $value }}% (threshold: 80%)"
+
+      - alert: CriticalCPUUsage
+        expr: system_cpu_utilization > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical CPU usage on {{ $labels.host_name }}"
+          description: "CPU usage is {{ $value }}% (threshold: 95%)"
+
+      # Alert when memory usage is high
+      - alert: HighMemoryUsage
+        expr: system_memory_utilization > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.host_name }}"
+          description: "Memory usage is {{ $value }}% (threshold: 85%)"
+
+      - alert: CriticalMemoryUsage
+        expr: system_memory_utilization > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical memory usage on {{ $labels.host_name }}"
+          description: "Memory usage is {{ $value }}% (threshold: 95%)"
+
+      # Alert when service is down
+      - alert: TelemetryServiceDown
+        expr: up{job="telemetry-service"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Telemetry service is down"
+          description: "The telemetry service has been down for more than 1 minute"
+
+      # Alert on rapid memory increase (potential leak)
+      - alert: MemoryLeakDetected
+        expr: rate(system_memory_usage[5m]) > 1000000000  # 1GB per 5 minutes
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Potential memory leak on {{ $labels.host_name }}"
+          description: "Memory usage is increasing rapidly"

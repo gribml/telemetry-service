@@ -1,0 +1,20 @@
+[service]
+name = "telemetry-service"
+version = "0.1.0"
+
+[metrics]
+# Collection interval in seconds
+interval = 5
+
+# Export format: "stdout", "otlp", or "json"
+export_format = "stdout"
+
+[otlp]
+# OTLP endpoint (only used when export_format = "otlp")
+endpoint = "http://localhost:4317"
+
+# Additional attributes to add to all metrics
+[attributes]
+environment = "production"
+region = "us-west-2"
+# Add custom attributes as needed
