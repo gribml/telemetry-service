@@ -44,6 +44,19 @@ A Rust service that collects and publishes CPU and memory utilization telemetry 
   - Type: Observable Gauge
   - Prometheus name: `system_memory_total_bytes`
 
+### Process Metrics
+
+- `process.cpu.usage` - CPU usage of the telemetry-service process
+  - Unit: `%`
+  - Type: Observable Gauge
+  - Prometheus name: `process_cpu_usage_percent`
+  - Note: per-core percentage (100% = one full core)
+
+- `process.memory.usage` - RSS memory usage of the telemetry-service process
+  - Unit: `By` (bytes)
+  - Type: Observable Gauge
+  - Prometheus name: `process_memory_usage_bytes`
+
 All metrics include the `host.name` attribute for identification.
 
 ## Prometheus Integration
