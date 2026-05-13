@@ -87,15 +87,16 @@ install-linux-service: install
 	@echo "Service installed. Start with: sudo systemctl start telemetry-service"
 
 install-macos-service: install
-	@echo "Installing launchd service..."
-	sudo cp com.telemetry.service.plist /Library/LaunchDaemons/
-	sudo launchctl load /Library/LaunchDaemons/com.telemetry.service.plist
-	@echo "Service installed and started"
+	@echo "Installing launchd agent..."
+	mkdir -p ~/Library/LaunchAgents
+	cp com.telemetry.service.plist ~/Library/LaunchAgents/
+	launchctl load ~/Library/LaunchAgents/com.telemetry.service.plist
+	@echo "Agent installed and started"
 
 uninstall:
 	@if [ "$$(uname)" = "Darwin" ]; then \
-		sudo launchctl unload /Library/LaunchDaemons/com.telemetry.service.plist 2>/dev/null || true; \
-		sudo rm -f /Library/LaunchDaemons/com.telemetry.service.plist; \
+		launchctl bootout gui/$$(id -u)/com.telemetry.service 2>/dev/null || true; \
+		rm -f ~/Library/LaunchAgents/com.telemetry.service.plist; \
 	elif [ "$$(uname)" = "Linux" ]; then \
 		sudo systemctl stop telemetry-service 2>/dev/null || true; \
 		sudo systemctl disable telemetry-service 2>/dev/null || true; \

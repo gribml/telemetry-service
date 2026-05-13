@@ -1,5 +1,7 @@
 use anyhow::Result;
 use axum::{routing::get, Router};
+use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter};
+use btleplug::platform::{Adapter, Manager, Peripheral};
 use opentelemetry::{global, metrics::{Meter, Unit}, KeyValue};
 use opentelemetry_sdk::{
     metrics::SdkMeterProvider,
@@ -7,6 +9,7 @@ use opentelemetry_sdk::{
 };
 use prometheus::{Encoder, TextEncoder};
 use sysinfo::{System, RefreshKind, CpuRefreshKind, MemoryRefreshKind, Pid};
+use uuid::Uuid;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -94,6 +97,197 @@ impl SystemMetrics {
         system.refresh_memory();
         system.total_memory()
     }
+}
+
+// --- Aranet4 CO2 monitor ---
+
+const ARANET4_READINGS_UUID: &str = "f0cd3001-95da-4f4b-9ac8-aa55d312af0c";
+
+#[derive(Clone)]
+struct Aranet4Reading {
+    device_name: String,
+    co2_ppm: u16,
+    temperature_c: f32,
+    pressure_hpa: f32,
+    humidity_pct: u8,
+    battery_pct: u8,
+    interval_secs: u16,
+    age_secs: u16,
+}
+
+struct Aranet4Metrics {
+    latest: Arc<Mutex<Option<Aranet4Reading>>>,
+}
+
+impl Aranet4Metrics {
+    fn new() -> Self {
+        Self { latest: Arc::new(Mutex::new(None)) }
+    }
+
+    fn update(&self, reading: Aranet4Reading) {
+        *self.latest.lock().unwrap() = Some(reading);
+    }
+
+    fn get(&self) -> Option<Aranet4Reading> {
+        self.latest.lock().unwrap().clone()
+    }
+}
+
+fn parse_aranet4(device_name: String, data: &[u8]) -> Option<Aranet4Reading> {
+    if data.len() < 13 {
+        return None;
+    }
+    Some(Aranet4Reading {
+        device_name,
+        co2_ppm: u16::from_le_bytes([data[0], data[1]]),
+        temperature_c: u16::from_le_bytes([data[2], data[3]]) as f32 / 20.0,
+        pressure_hpa: u16::from_le_bytes([data[4], data[5]]) as f32 / 10.0,
+        humidity_pct: data[6],
+        battery_pct: data[7],
+        interval_secs: u16::from_le_bytes([data[9], data[10]]),
+        age_secs: u16::from_le_bytes([data[11], data[12]]),
+    })
+}
+
+async fn find_aranet4(adapter: &Adapter) -> anyhow::Result<(Peripheral, String)> {
+    adapter.start_scan(ScanFilter::default()).await?;
+    time::sleep(Duration::from_secs(10)).await;
+    adapter.stop_scan().await?;
+
+    for peripheral in adapter.peripherals().await? {
+        if let Some(props) = peripheral.properties().await? {
+            if let Some(name) = props.local_name.filter(|n| n.starts_with("Aranet4")) {
+                return Ok((peripheral, name));
+            }
+        }
+    }
+    anyhow::bail!("Aranet4 not found during scan")
+}
+
+async fn try_collect_aranet4(metrics: &Arc<Aranet4Metrics>) -> anyhow::Result<u64> {
+    let manager = Manager::new().await?;
+    let adapter = manager.adapters().await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No Bluetooth adapter found"))?;
+
+    let (device, device_name) = find_aranet4(&adapter).await?;
+    device.connect().await?;
+    device.discover_services().await?;
+
+    let readings_uuid = Uuid::parse_str(ARANET4_READINGS_UUID)?;
+    let characteristic = device.characteristics()
+        .into_iter()
+        .find(|c| c.uuid == readings_uuid)
+        .ok_or_else(|| anyhow::anyhow!("Aranet4 readings characteristic not found"))?;
+
+    let data = device.read(&characteristic).await?;
+    device.disconnect().await.ok();
+
+    let reading = parse_aranet4(device_name, &data)
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse Aranet4 data ({} bytes)", data.len()))?;
+
+    let wait_secs = (reading.interval_secs.saturating_sub(reading.age_secs) as u64).max(5);
+    metrics.update(reading);
+    Ok(wait_secs)
+}
+
+async fn aranet4_collection_loop(metrics: Arc<Aranet4Metrics>) {
+    loop {
+        match try_collect_aranet4(&metrics).await {
+            Ok(wait_secs) => time::sleep(Duration::from_secs(wait_secs)).await,
+            Err(e) => {
+                eprintln!("Aranet4 error: {e}");
+                time::sleep(Duration::from_secs(30)).await;
+            }
+        }
+    }
+}
+
+fn register_aranet4_metrics(meter: &Meter, aranet4: Arc<Aranet4Metrics>) -> Result<()> {
+    let hostname = hostname::get().unwrap().to_string_lossy().to_string();
+
+    let a = aranet4.clone();
+    let h = hostname.clone();
+    let _co2 = meter
+        .f64_observable_gauge("environment.co2")
+        .with_description("CO2 concentration")
+        .with_unit(Unit::new("ppm"))
+        .with_callback(move |observer| {
+            if let Some(r) = a.get() {
+                observer.observe(r.co2_ppm as f64, &[
+                    KeyValue::new("host.name", h.clone()),
+                    KeyValue::new("device", r.device_name.clone()),
+                ]);
+            }
+        })
+        .init();
+
+    let a = aranet4.clone();
+    let h = hostname.clone();
+    let _temp = meter
+        .f64_observable_gauge("environment.temperature")
+        .with_description("Ambient temperature")
+        .with_unit(Unit::new("Cel"))
+        .with_callback(move |observer| {
+            if let Some(r) = a.get() {
+                observer.observe(r.temperature_c as f64, &[
+                    KeyValue::new("host.name", h.clone()),
+                    KeyValue::new("device", r.device_name.clone()),
+                ]);
+            }
+        })
+        .init();
+
+    let a = aranet4.clone();
+    let h = hostname.clone();
+    let _pressure = meter
+        .f64_observable_gauge("environment.pressure")
+        .with_description("Atmospheric pressure")
+        .with_unit(Unit::new("hPa"))
+        .with_callback(move |observer| {
+            if let Some(r) = a.get() {
+                observer.observe(r.pressure_hpa as f64, &[
+                    KeyValue::new("host.name", h.clone()),
+                    KeyValue::new("device", r.device_name.clone()),
+                ]);
+            }
+        })
+        .init();
+
+    let a = aranet4.clone();
+    let h = hostname.clone();
+    let _humidity = meter
+        .f64_observable_gauge("environment.humidity")
+        .with_description("Relative humidity")
+        .with_unit(Unit::new("%"))
+        .with_callback(move |observer| {
+            if let Some(r) = a.get() {
+                observer.observe(r.humidity_pct as f64, &[
+                    KeyValue::new("host.name", h.clone()),
+                    KeyValue::new("device", r.device_name.clone()),
+                ]);
+            }
+        })
+        .init();
+
+    let a = aranet4.clone();
+    let h = hostname;
+    let _battery = meter
+        .f64_observable_gauge("environment.aranet4.battery")
+        .with_description("Aranet4 battery level")
+        .with_unit(Unit::new("%"))
+        .with_callback(move |observer| {
+            if let Some(r) = a.get() {
+                observer.observe(r.battery_pct as f64, &[
+                    KeyValue::new("host.name", h.clone()),
+                    KeyValue::new("device", r.device_name.clone()),
+                ]);
+            }
+        })
+        .init();
+
+    Ok(())
 }
 
 /// Initialize OpenTelemetry metrics with Prometheus exporter
@@ -269,7 +463,7 @@ async fn health_handler() -> &'static str {
 }
 
 /// Manual metrics collection and logging loop
-async fn metrics_logging_loop(metrics: Arc<SystemMetrics>) {
+async fn metrics_logging_loop(metrics: Arc<SystemMetrics>, aranet4: Arc<Aranet4Metrics>) {
     let hostname = hostname::get()
         .unwrap()
         .to_string_lossy()
@@ -302,6 +496,18 @@ async fn metrics_logging_loop(metrics: Arc<SystemMetrics>) {
         println!("  Memory Usage: {:.2} GB / {:.2} GB", mem_used_gb, mem_total_gb);
         println!("  Memory Usage (bytes): {} / {}", mem_used_bytes, mem_total_bytes);
         println!("  [self] CPU: {:.2}%  Memory: {:.1} MB", self_cpu, self_mem_mb);
+        match aranet4.get() {
+            Some(r) => {
+                let age = if r.age_secs < 60 {
+                    format!("{}s ago", r.age_secs)
+                } else {
+                    format!("{}m ago", r.age_secs / 60)
+                };
+                println!("  [{}] CO2: {} ppm  Temp: {:.1}°C  Humidity: {}%  Pressure: {:.1} hPa  Battery: {}%  ({})",
+                    r.device_name, r.co2_ppm, r.temperature_c, r.humidity_pct, r.pressure_hpa, r.battery_pct, age);
+            }
+            None => println!("  Aranet4: scanning..."),
+        }
     }
 }
 
@@ -348,6 +554,10 @@ async fn main() -> Result<()> {
     // Register OpenTelemetry metrics
     register_metrics(&meter, metrics.clone())?;
 
+    // Set up Aranet4 CO2 monitor
+    let aranet4 = Arc::new(Aranet4Metrics::new());
+    register_aranet4_metrics(&meter, aranet4.clone())?;
+
     // Start HTTP server for Prometheus endpoint
     let http_handle = {
         let registry = registry.clone();
@@ -358,8 +568,11 @@ async fn main() -> Result<()> {
         })
     };
 
+    // Start Aranet4 collection loop
+    let aranet4_handle = tokio::spawn(aranet4_collection_loop(aranet4.clone()));
+
     // Start metrics logging loop
-    let logging_handle = tokio::spawn(metrics_logging_loop(metrics));
+    let logging_handle = tokio::spawn(metrics_logging_loop(metrics, aranet4));
 
     // Wait for Ctrl+C
     tokio::select! {
@@ -368,6 +581,9 @@ async fn main() -> Result<()> {
         }
         _ = http_handle => {
             println!("\n\n⚠️  HTTP server terminated unexpectedly");
+        }
+        _ = aranet4_handle => {
+            println!("\n\n⚠️  Aranet4 collection loop terminated unexpectedly");
         }
         _ = logging_handle => {
             println!("\n\n⚠️  Logging loop terminated unexpectedly");

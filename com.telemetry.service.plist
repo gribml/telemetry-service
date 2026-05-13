@@ -17,13 +17,13 @@
     <true/>
     
     <key>StandardOutPath</key>
-    <string>/usr/local/var/log/telemetry-service.log</string>
-    
+    <string>/tmp/telemetry-service.log</string>
+
     <key>StandardErrorPath</key>
-    <string>/usr/local/var/log/telemetry-service.error.log</string>
-    
+    <string>/tmp/telemetry-service.error.log</string>
+
     <key>WorkingDirectory</key>
-    <string>/usr/local/var/telemetry-service</string>
+    <string>/tmp</string>
     
     <key>ThrottleInterval</key>
     <integer>10</integer>
