@@ -1,7 +1,7 @@
 use anyhow::Result;
 use axum::{routing::get, Router};
 use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter};
-use btleplug::platform::{Adapter, Manager, Peripheral};
+use btleplug::platform::Manager;
 use opentelemetry::{global, metrics::{Meter, Unit}, KeyValue};
 use opentelemetry_sdk::{
     metrics::SdkMeterProvider,
@@ -9,7 +9,6 @@ use opentelemetry_sdk::{
 };
 use prometheus::{Encoder, TextEncoder};
 use sysinfo::{System, RefreshKind, CpuRefreshKind, MemoryRefreshKind, Pid};
-use uuid::Uuid;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -101,7 +100,7 @@ impl SystemMetrics {
 
 // --- Aranet4 CO2 monitor ---
 
-const ARANET4_READINGS_UUID: &str = "f0cd3001-95da-4f4b-9ac8-aa55d312af0c";
+const ARANET4_MANUFACTURER_ID: u16 = 0x0702;
 
 #[derive(Clone)]
 struct Aranet4Reading {
@@ -113,6 +112,7 @@ struct Aranet4Reading {
     battery_pct: u8,
     interval_secs: u16,
     age_secs: u16,
+    read_at: Instant,
 }
 
 struct Aranet4Metrics {
@@ -133,72 +133,82 @@ impl Aranet4Metrics {
     }
 }
 
-fn parse_aranet4(device_name: String, data: &[u8]) -> Option<Aranet4Reading> {
-    if data.len() < 13 {
+fn parse_aranet4_advertisement(device_name: String, data: &[u8]) -> Option<Aranet4Reading> {
+    eprintln!("Aranet4: raw advertisement bytes ({} bytes): {:02x?}", data.len(), data);
+    // Aranet4 advertisement manufacturer data layout (after company ID):
+    // [0-7]:  header (disconnect count, version, unknown)
+    // [8-9]:  CO2 ppm (u16 LE)
+    // [10-11]: temperature * 20 (u16 LE)
+    // [12-13]: pressure * 10 (u16 LE)
+    // [14]:   humidity %
+    // [15]:   battery %
+    // [16]:   status flags
+    // [17-18]: measurement interval secs (u16 LE)
+    // [19-20]: age secs since last measurement (u16 LE)
+    if data.len() < 21 {
+        eprintln!("Aranet4: advertisement too short ({} bytes, need 21)", data.len());
         return None;
     }
     Some(Aranet4Reading {
         device_name,
-        co2_ppm: u16::from_le_bytes([data[0], data[1]]),
-        temperature_c: u16::from_le_bytes([data[2], data[3]]) as f32 / 20.0,
-        pressure_hpa: u16::from_le_bytes([data[4], data[5]]) as f32 / 10.0,
-        humidity_pct: data[6],
-        battery_pct: data[7],
-        interval_secs: u16::from_le_bytes([data[9], data[10]]),
-        age_secs: u16::from_le_bytes([data[11], data[12]]),
+        co2_ppm: u16::from_le_bytes([data[8], data[9]]),
+        temperature_c: u16::from_le_bytes([data[10], data[11]]) as f32 / 20.0,
+        pressure_hpa: u16::from_le_bytes([data[12], data[13]]) as f32 / 10.0,
+        humidity_pct: data[14],
+        battery_pct: data[15],
+        interval_secs: u16::from_le_bytes([data[17], data[18]]),
+        age_secs: u16::from_le_bytes([data[19], data[20]]),
+        read_at: Instant::now(),
     })
 }
 
-async fn find_aranet4(adapter: &Adapter) -> anyhow::Result<(Peripheral, String)> {
-    adapter.start_scan(ScanFilter::default()).await?;
-    time::sleep(Duration::from_secs(10)).await;
-    adapter.stop_scan().await?;
-
-    for peripheral in adapter.peripherals().await? {
-        if let Some(props) = peripheral.properties().await? {
-            if let Some(name) = props.local_name.filter(|n| n.starts_with("Aranet4")) {
-                return Ok((peripheral, name));
-            }
-        }
-    }
-    anyhow::bail!("Aranet4 not found during scan")
-}
-
-async fn try_collect_aranet4(metrics: &Arc<Aranet4Metrics>) -> anyhow::Result<u64> {
+async fn scan_for_aranet4_reading(metrics: &Arc<Aranet4Metrics>) -> anyhow::Result<Aranet4Reading> {
     let manager = Manager::new().await?;
     let adapter = manager.adapters().await?
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("No Bluetooth adapter found"))?;
 
-    let (device, device_name) = find_aranet4(&adapter).await?;
-    device.connect().await?;
-    device.discover_services().await?;
+    eprintln!("Aranet4: scanning for advertisement...");
+    adapter.start_scan(ScanFilter::default()).await?;
+    time::sleep(Duration::from_secs(15)).await;
+    adapter.stop_scan().await?;
 
-    let readings_uuid = Uuid::parse_str(ARANET4_READINGS_UUID)?;
-    let characteristic = device.characteristics()
-        .into_iter()
-        .find(|c| c.uuid == readings_uuid)
-        .ok_or_else(|| anyhow::anyhow!("Aranet4 readings characteristic not found"))?;
-
-    let data = device.read(&characteristic).await?;
-    device.disconnect().await.ok();
-
-    let reading = parse_aranet4(device_name, &data)
-        .ok_or_else(|| anyhow::anyhow!("Failed to parse Aranet4 data ({} bytes)", data.len()))?;
-
-    let wait_secs = (reading.interval_secs.saturating_sub(reading.age_secs) as u64).max(5);
-    metrics.update(reading);
-    Ok(wait_secs)
+    let peripherals = adapter.peripherals().await?;
+    eprintln!("Aranet4: scan found {} devices", peripherals.len());
+    for peripheral in peripherals {
+        if let Some(props) = peripheral.properties().await? {
+            if let Some(name) = props.local_name.as_deref().filter(|n| n.starts_with("Aranet4")) {
+                eprintln!("Aranet4: found {name}");
+                if let Some(mfr_data) = props.manufacturer_data.get(&ARANET4_MANUFACTURER_ID) {
+                    if let Some(reading) = parse_aranet4_advertisement(name.to_string(), mfr_data) {
+                        eprintln!("Aranet4: CO2={} ppm  age={}s  interval={}s",
+                            reading.co2_ppm, reading.age_secs, reading.interval_secs);
+                        metrics.update(reading.clone());
+                        return Ok(reading);
+                    }
+                } else {
+                    eprintln!("Aranet4: found {name} but no manufacturer data for 0x{:04x} (keys: {:?})",
+                        ARANET4_MANUFACTURER_ID, props.manufacturer_data.keys().collect::<Vec<_>>());
+                }
+            }
+        }
+    }
+    anyhow::bail!("Aranet4 not found or no advertisement data during scan")
 }
 
 async fn aranet4_collection_loop(metrics: Arc<Aranet4Metrics>) {
     loop {
-        match try_collect_aranet4(&metrics).await {
-            Ok(wait_secs) => time::sleep(Duration::from_secs(wait_secs)).await,
+        match scan_for_aranet4_reading(&metrics).await {
+            Ok(reading) => {
+                let elapsed = reading.age_secs as u64 + reading.read_at.elapsed().as_secs();
+                let wait_secs = (reading.interval_secs as u64).saturating_sub(elapsed).max(5);
+                eprintln!("Aranet4: next read in {wait_secs}s");
+                time::sleep(Duration::from_secs(wait_secs)).await;
+            }
             Err(e) => {
-                eprintln!("Aranet4 error: {e}");
-                time::sleep(Duration::from_secs(30)).await;
+                eprintln!("Aranet4 error: {e}, retrying in 60s...");
+                time::sleep(Duration::from_secs(60)).await;
             }
         }
     }
@@ -498,10 +508,11 @@ async fn metrics_logging_loop(metrics: Arc<SystemMetrics>, aranet4: Arc<Aranet4M
         println!("  [self] CPU: {:.2}%  Memory: {:.1} MB", self_cpu, self_mem_mb);
         match aranet4.get() {
             Some(r) => {
-                let age = if r.age_secs < 60 {
-                    format!("{}s ago", r.age_secs)
+                let current_age = r.age_secs as u64 + r.read_at.elapsed().as_secs();
+                let age = if current_age < 60 {
+                    format!("{}s ago", current_age)
                 } else {
-                    format!("{}m ago", r.age_secs / 60)
+                    format!("{}m{}s ago", current_age / 60, current_age % 60)
                 };
                 println!("  [{}] CO2: {} ppm  Temp: {:.1}°C  Humidity: {}%  Pressure: {:.1} hPa  Battery: {}%  ({})",
                     r.device_name, r.co2_ppm, r.temperature_c, r.humidity_pct, r.pressure_hpa, r.battery_pct, age);

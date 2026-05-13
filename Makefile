@@ -90,7 +90,8 @@ install-macos-service: install
 	@echo "Installing launchd agent..."
 	mkdir -p ~/Library/LaunchAgents
 	cp com.telemetry.service.plist ~/Library/LaunchAgents/
-	launchctl load ~/Library/LaunchAgents/com.telemetry.service.plist
+	launchctl unload ~/Library/LaunchAgents/com.telemetry.service.plist 2>/dev/null || true
+	launchctl load -w ~/Library/LaunchAgents/com.telemetry.service.plist
 	@echo "Agent installed and started"
 
 uninstall:
